@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#101010" />
+  <title>DV 分屏特效生成器</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div>
+        <p class="eyebrow">LOCAL · PRIVATE · FAST</p>
+        <h1>DV 分屏特效生成器</h1>
+        <p class="sub">上传一张/两张图片或视频，自动生成上下分屏、REC 取景框、暖色电影感和开场模糊。</p>
+      </div>
+      <span class="badge">素材仅在本机处理</span>
+    </header>
+
+    <section class="grid">
+      <aside class="panel controls">
+        <label class="upload">
+          <span>上半屏素材</span>
+          <input id="topInput" type="file" accept="image/*,video/*" />
+          <b id="topName">选择图片或视频</b>
+        </label>
+        <label class="upload">
+          <span>下半屏素材</span>
+          <input id="bottomInput" type="file" accept="image/*,video/*" />
+          <b id="bottomName">未选择时复用上半屏</b>
+        </label>
+
+        <div class="control-row">
+          <label>暖色强度 <output id="warmOut">35</output></label>
+          <input id="warm" type="range" min="0" max="100" value="35" />
+        </div>
+        <div class="control-row">
+          <label>颗粒强度 <output id="grainOut">14</output></label>
+          <input id="grain" type="range" min="0" max="45" value="14" />
+        </div>
+        <div class="control-row">
+          <label>暗角强度 <output id="vignetteOut">28</output></label>
+          <input id="vignette" type="range" min="0" max="70" value="28" />
+        </div>
+        <div class="control-row inline">
+          <label><input id="mirrorTop" type="checkbox" /> 上屏镜像</label>
+          <label><input id="mirrorBottom" type="checkbox" /> 下屏镜像</label>
+        </div>
+        <div class="control-row inline">
+          <label><input id="recOverlay" type="checkbox" checked /> REC 界面</label>
+          <label><input id="introBlur" type="checkbox" checked /> 开场模糊</label>
+        </div>
+
+        <div class="actions">
+          <button id="playBtn" class="primary">预览 / 播放</button>
+          <button id="imageBtn">导出封面图</button>
+          <button id="recordBtn">导出苹果兼容 MP4</button>
+          <p class="export-note">首次导出会加载视频转换组件。生成的是 H.264 MP4，可在 iPhone、iPad、微信和相册中播放。</p>
+        </div>
+        <p id="status" class="status">等待上传素材</p>
+      </aside>
+
+      <section class="panel stage-wrap">
+        <canvas id="canvas" width="720" height="1280"></canvas>
+        <div class="hint">输出比例 9:16 · 720×1280</div>
+      </section>
+    </section>
+  </main>
+  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
