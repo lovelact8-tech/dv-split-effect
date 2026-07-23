@@ -55,10 +55,33 @@
         <div class="actions">
           <button id="playBtn" class="primary">预览 / 播放</button>
           <button id="imageBtn">导出封面图</button>
-          <button id="recordBtn">导出苹果兼容 MP4</button>
-          <p class="export-note">首次导出会加载视频转换组件。生成的是 H.264 MP4，可在 iPhone、iPad、微信和相册中播放。</p>
+          <button id="recordBtn">导出 6 秒 MP4（苹果兼容）</button>
         </div>
-        <p id="status" class="status">等待上传素材</p>
+
+        <div id="exportProgress" class="export-progress" hidden>
+          <div class="progress-head">
+            <strong id="progressTitle">准备导出</strong>
+            <span id="progressPercent">0%</span>
+          </div>
+          <div
+            id="progressTrack"
+            class="progress-track"
+            role="progressbar"
+            aria-label="视频导出进度"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+          >
+            <i id="progressBar"></i>
+          </div>
+          <p id="progressDetail">请保持页面在前台，不要锁屏。</p>
+        </div>
+
+        <div class="mp4-note">
+          <strong>真正的 H.264 MP4</strong>
+          <p>首次导出需加载约 31 MB 的转码核心，之后浏览器通常会缓存。素材和视频均只在本机处理。</p>
+        </div>
+        <p id="status" class="status" role="status" aria-live="polite">等待上传素材</p>
       </aside>
 
       <section class="panel stage-wrap">
@@ -67,7 +90,7 @@
       </section>
     </section>
   </main>
-  <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+  <script src="vendor/ffmpeg/ffmpeg.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

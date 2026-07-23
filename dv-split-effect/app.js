@@ -3,11 +3,32 @@ const canvas = $('#canvas');
 const ctx = canvas.getContext('2d', { alpha: false });
 const W = canvas.width, H = canvas.height;
 let topMedia = null, bottomMedia = null, raf = 0, startedAt = performance.now();
+let ffmpeg = null;
+let ffmpegLoadPromise = null;
+let lastFFmpegLog = '';
+
+const EXPORT_SECONDS = 6;
+const FFMPEG_CORE_URL = new URL('vendor/ffmpeg/ffmpeg-core.js', location.href).href;
+const FFMPEG_WASM_URL = new URL('vendor/ffmpeg/ffmpeg-core.wasm', location.href).href;
 
 const controls = ['warm','grain','vignette'];
 controls.forEach(id => { const el=$('#'+id), out=$('#'+id+'Out'); el.addEventListener('input',()=>out.value=el.value); });
 
-function setStatus(text){ $('#status').textContent=text; }
+function setStatus(text, tone=''){
+  const status=$('#status');
+  status.textContent=text;
+  status.className=`status ${tone}`.trim();
+}
+function setProgress(percent,title,detail){
+  const value=Math.max(0,Math.min(100,Math.round(percent)));
+  $('#exportProgress').hidden=false;
+  $('#progressTitle').textContent=title;
+  $('#progressPercent').textContent=`${value}%`;
+  $('#progressBar').style.width=`${value}%`;
+  $('#progressTrack').setAttribute('aria-valuenow',String(value));
+  $('#progressDetail').textContent=detail;
+}
+function hideProgress(){ $('#exportProgress').hidden=true; }
 function mediaFromFile(file){
   return new Promise((resolve,reject)=>{
     const url=URL.createObjectURL(file);
@@ -27,7 +48,7 @@ async function bindInput(input, key){
     if(key==='top'){ if(topMedia)URL.revokeObjectURL(topMedia.url); topMedia=media; $('#topName').textContent=file.name; }
     else { if(bottomMedia)URL.revokeObjectURL(bottomMedia.url); bottomMedia=media; $('#bottomName').textContent=file.name; }
     startedAt=performance.now(); draw(); setStatus('素材已加载，可以预览或导出');
-  }catch(e){ setStatus('素材读取失败，请换一个文件'); }
+  }catch(e){ setStatus('素材读取失败，请换一个文件','error'); }
 }
 $('#topInput').addEventListener('change',e=>bindInput(e.target,'top'));
 $('#bottomInput').addEventListener('change',e=>bindInput(e.target,'bottom'));
@@ -85,87 +106,163 @@ $('#playBtn').addEventListener('click',playAll);
 $('#imageBtn').addEventListener('click',()=>{
   if(!topMedia)return setStatus('请先上传素材');
   canvas.toBlob(blob=>{const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='dv-split-cover.png';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);},'image/png');
-  setStatus('封面图已导出');
+  setStatus('封面图已导出','success');
 });
-let ffmpegInstance = null;
 
-function downloadBlob(blob, filename){
+function getRecorderMimeType(){
+  const candidates=[
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+    'video/mp4;codecs=avc1.42E01E',
+    'video/mp4'
+  ];
+  if(!MediaRecorder.isTypeSupported)return '';
+  return candidates.find(type=>MediaRecorder.isTypeSupported(type))||'';
+}
+
+function recordCanvas(){
+  return new Promise(async(resolve,reject)=>{
+    let timer=0;
+    let progressTimer=0;
+    let stream=null;
+    try{
+      await playAll();
+      stream=canvas.captureStream(30);
+      const mime=getRecorderMimeType();
+      const options=mime?{mimeType:mime,videoBitsPerSecond:6_000_000}:{videoBitsPerSecond:6_000_000};
+      const chunks=[];
+      const recorder=new MediaRecorder(stream,options);
+      const began=performance.now();
+
+      recorder.ondataavailable=event=>{if(event.data.size)chunks.push(event.data);};
+      recorder.onerror=event=>reject(event.error||new Error('浏览器录制失败'));
+      recorder.onstop=()=>{
+        clearTimeout(timer);
+        clearInterval(progressTimer);
+        stream.getTracks().forEach(track=>track.stop());
+        if(!chunks.length)return reject(new Error('没有生成临时视频数据'));
+        const type=recorder.mimeType||mime||'video/webm';
+        resolve(new Blob(chunks,{type}));
+      };
+
+      recorder.start(250);
+      setStatus('正在生成 6 秒画面，请保持页面在前台…');
+      setProgress(1,'正在生成画面','第 1/3 步：实时录制 6 秒分屏特效。');
+      progressTimer=setInterval(()=>{
+        const ratio=Math.min(1,(performance.now()-began)/(EXPORT_SECONDS*1000));
+        setProgress(1+ratio*29,'正在生成画面',`第 1/3 步：已录制 ${(ratio*EXPORT_SECONDS).toFixed(1)} / ${EXPORT_SECONDS} 秒。`);
+      },120);
+      timer=setTimeout(()=>recorder.stop(),EXPORT_SECONDS*1000);
+    }catch(error){
+      clearTimeout(timer);
+      clearInterval(progressTimer);
+      stream?.getTracks().forEach(track=>track.stop());
+      reject(error);
+    }
+  });
+}
+
+async function ensureFFmpeg(){
+  if(ffmpeg?.loaded)return ffmpeg;
+  if(ffmpegLoadPromise)return ffmpegLoadPromise;
+  if(!window.FFmpegWASM?.FFmpeg)throw new Error('转码组件脚本未加载，请确认 vendor/ffmpeg 文件夹已完整上传');
+
+  ffmpegLoadPromise=(async()=>{
+    setProgress(32,'首次加载转码核心','第 2/3 步：正在加载约 31 MB 的 ffmpeg.wasm，首次会较慢。');
+    setStatus('首次导出：正在加载约 31 MB 的转码核心…');
+    ffmpeg=new FFmpegWASM.FFmpeg();
+    ffmpeg.on('log',({message})=>{lastFFmpegLog=message||lastFFmpegLog;});
+    ffmpeg.on('progress',({progress,time})=>{
+      if(!Number.isFinite(progress))return;
+      const ratio=Math.max(0,Math.min(1,progress));
+      const seconds=Number.isFinite(time)?Math.max(0,time/1_000_000):0;
+      setProgress(55+ratio*43,'正在转成 H.264 MP4',`第 3/3 步：已处理约 ${seconds.toFixed(1)} 秒画面，请勿关闭页面。`);
+    });
+    await ffmpeg.load({coreURL:FFMPEG_CORE_URL,wasmURL:FFMPEG_WASM_URL});
+    setProgress(52,'转码核心已就绪','第 2/3 步完成，正在写入临时视频。');
+    return ffmpeg;
+  })().catch(error=>{
+    ffmpeg=null;
+    ffmpegLoadPromise=null;
+    throw error;
+  });
+  return ffmpegLoadPromise;
+}
+
+async function transcodeToAppleMp4(inputBlob){
+  const engine=await ensureFFmpeg();
+  const stamp=Date.now();
+  const inputExt=inputBlob.type.includes('mp4')?'mp4':'webm';
+  const inputName=`input-${stamp}.${inputExt}`;
+  const outputName=`output-${stamp}.mp4`;
+  lastFFmpegLog='';
+
+  try{
+    setProgress(54,'正在准备转码','第 3/3 步：正在把临时视频写入本机转码器。');
+    await engine.writeFile(inputName,new Uint8Array(await inputBlob.arrayBuffer()));
+    const exitCode=await engine.exec([
+      '-i',inputName,
+      '-an',
+      '-c:v','libx264',
+      '-preset','ultrafast',
+      '-crf','23',
+      '-pix_fmt','yuv420p',
+      '-r','30',
+      '-movflags','+faststart',
+      outputName
+    ]);
+    if(exitCode!==0)throw new Error(`H.264 转码失败（代码 ${exitCode}）${lastFFmpegLog?`：${lastFFmpegLog}`:''}`);
+    const data=await engine.readFile(outputName);
+    if(!data?.length)throw new Error('转码完成但没有生成 MP4 文件');
+    return new Blob([data.buffer],{type:'video/mp4'});
+  }finally{
+    await engine.deleteFile(inputName).catch(()=>{});
+    await engine.deleteFile(outputName).catch(()=>{});
+  }
+}
+
+function downloadBlob(blob,filename){
   const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
-  a.href=url;
-  a.download=filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(()=>URL.revokeObjectURL(url),10000);
+  const link=document.createElement('a');
+  link.href=url;
+  link.download=filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),5000);
 }
 
-async function loadFfmpeg(){
-  if(ffmpegInstance) return ffmpegInstance;
-  if(!window.FFmpeg?.createFFmpeg) throw new Error('MP4 转换组件加载失败，请检查网络后刷新页面');
-  const { createFFmpeg }=window.FFmpeg;
-  ffmpegInstance=createFFmpeg({
-    log:false,
-    corePath:'https://unpkg.com/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js'
-  });
-  setStatus('首次使用：正在加载 MP4 转换组件…');
-  await ffmpegInstance.load();
-  return ffmpegInstance;
-}
-
-async function recordCanvasWebm(durationMs=6000){
-  const stream=canvas.captureStream(30);
-  const candidates=['video/webm;codecs=vp8','video/webm;codecs=vp9','video/webm'];
-  const mime=candidates.find(x=>MediaRecorder.isTypeSupported?.(x))||'';
-  if(!mime) throw new Error('当前浏览器不能录制画布视频');
-  const chunks=[];
-  const recorder=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:5_000_000});
-  return new Promise((resolve,reject)=>{
-    recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data)};
-    recorder.onerror=()=>reject(new Error('录制失败'));
-    recorder.onstop=()=>resolve(new Blob(chunks,{type:mime}));
-    recorder.start(250);
-    setTimeout(()=>recorder.state!=='inactive'&&recorder.stop(),durationMs);
-  });
-}
-
-async function convertWebmToMp4(webmBlob){
-  const ffmpeg=await loadFfmpeg();
-  const { fetchFile }=window.FFmpeg;
-  try{ffmpeg.FS('unlink','input.webm')}catch(_){ }
-  try{ffmpeg.FS('unlink','output.mp4')}catch(_){ }
-  ffmpeg.FS('writeFile','input.webm',await fetchFile(webmBlob));
-  setStatus('正在转换为苹果兼容 H.264 MP4…');
-  await ffmpeg.run(
-    '-i','input.webm',
-    '-an',
-    '-c:v','libx264',
-    '-preset','ultrafast',
-    '-crf','25',
-    '-pix_fmt','yuv420p',
-    '-movflags','+faststart',
-    '-r','30',
-    'output.mp4'
-  );
-  const data=ffmpeg.FS('readFile','output.mp4');
-  return new Blob([data.buffer],{type:'video/mp4'});
+function friendlyExportError(error){
+  const message=String(error?.message||error||'未知错误');
+  if(/memory|abort\(|out of bounds|allocation/i.test(message))return '设备内存不足。请关闭其他页面后重试；较旧的 iPhone/iPad 可能无法完成浏览器端转码。';
+  if(/fetch|network|load|Failed to fetch/i.test(message))return '转码核心加载失败。请确认网络正常，并检查 vendor/ffmpeg 文件夹是否完整上传。';
+  if(/libx264|encoder/i.test(message))return 'H.264 编码器未能启动。请确认使用本项目随附的 ffmpeg-core 文件，不要替换为精简版。';
+  return `MP4 导出失败：${message}`;
 }
 
 $('#recordBtn').addEventListener('click',async()=>{
-  if(!topMedia)return setStatus('请先上传素材');
-  if(!window.MediaRecorder||!canvas.captureStream)return setStatus('当前浏览器不支持网页视频导出，请使用最新版 Safari 或 Chrome');
-  const btn=$('#recordBtn');btn.disabled=true;
+  if(!topMedia)return setStatus('请先上传素材','error');
+  if(!window.MediaRecorder||!canvas.captureStream)return setStatus('当前浏览器不支持画布视频录制，请升级 Safari、Chrome 或 Edge。','error');
+
+  const btn=$('#recordBtn');
+  btn.disabled=true;
+  $('#playBtn').disabled=true;
+  $('#imageBtn').disabled=true;
+
   try{
-    await playAll();
-    setStatus('正在生成 6 秒临时视频…');
-    const webm=await recordCanvasWebm(6000);
-    const mp4=await convertWebmToMp4(webm);
+    const recorded=await recordCanvas();
+    const mp4=await transcodeToAppleMp4(recorded);
+    setProgress(100,'MP4 已生成','H.264 + yuv420p + faststart，可用于苹果相册和常见社交平台。');
     downloadBlob(mp4,'dv-split-effect.mp4');
-    setStatus('MP4 已生成。可在苹果相册、微信和常见播放器中打开');
-  }catch(err){
-    console.error(err);
-    setStatus(`导出失败：${err?.message||'未知错误'}。建议使用 Safari 并保持页面在前台。`);
+    setStatus('苹果兼容 MP4 已导出','success');
+  }catch(error){
+    console.error(error);
+    setProgress(0,'导出未完成','可以检查提示后重新点击导出。');
+    setStatus(friendlyExportError(error),'error');
   }finally{
     btn.disabled=false;
+    $('#playBtn').disabled=false;
+    $('#imageBtn').disabled=false;
   }
 });
